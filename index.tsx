@@ -176,7 +176,7 @@ const LoginScreen = ({ onLogin, onGoRegister }: { onLogin: (u: AppUser) => void;
             try {
                 const { data: p } = await supabase.from('users').select('first_name,business_name').eq('id', data.user!.id).single();
                 firstName = p?.first_name; businessName = p?.business_name;
-            } catch { /* ok */ }
+            } catch (profileErr) { console.error('[login] error fetching user profile:', profileErr); }
             onLogin({ id: data.user!.id, email: data.user!.email!, firstName, businessName });
         } catch (err: any) {
             const m = err.message || '';
@@ -274,7 +274,13 @@ const RegisterScreen = ({ onRegister, onGoLogin }: { onRegister: (u: AppUser) =>
             const { data, error: err } = await supabase.auth.signUp({ email, password });
             if (err) throw err;
             const now = new Date().toISOString();
-            try { await supabase.from('users').insert({ id: data.user!.id, email, first_name: firstName, role: 'owner', business_name: businessName || null, owner_id: null, created_at: now, updated_at: now }); } catch { /* ok */ }
+            const { error: insertErr } = await supabase.from('users').insert({ id: data.user!.id, email, first_name: firstName, role: 'owner', business_name: businessName || null, owner_id: null, created_at: now, updated_at: now });
+            if (insertErr) {
+                console.error('[signup] error inserting user profile:', insertErr);
+                setError('Tu cuenta fue creada pero no pudimos guardar tu perfil. Contactá al soporte.');
+                setLoading(false);
+                return;
+            }
             if (data.session) onRegister({ id: data.user!.id, email, firstName, businessName: businessName || undefined });
             else setSuccess(true);
         } catch (err: any) {
@@ -813,7 +819,7 @@ const DatabaseTab = ({ recipes, onEdit, onDelete, onImport, addToast }: {
 
             <div className="alert-info text-xs" style={{ color: 'var(--text-2)' }}>
                 <span style={{ color: 'var(--accent)' }}>💡</span>
-                <span><strong style={{ color: 'var(--text-1)' }}>Tus datos se guardan en este navegador.</strong> Usa "Backup" para hacer copias de seguridad y "Restaurar" para recuperarlas.</span>
+                <span><strong style={{ color: 'var(--text-1)' }}>Tus datos se guardan en la nube.</strong> Podés acceder desde cualquier dispositivo. Usá "Backup" para exportar una copia local y "Restaurar" para importarla.</span>
             </div>
         </div>
     );
@@ -1079,6 +1085,8 @@ const App = () => {
     const [activeTab, setActiveTab] = useState<ActiveTab>('calculator');
     const [recipes, setRecipes] = useState<SavedRecipe[]>([]);
     const [catalog, setCatalog] = useState<IngredientMaster[]>([]);
+    const recipesHydrated = useRef(false);
+    const catalogHydrated = useRef(false);
     const [editingRecipe, setEditingRecipe] = useState<SavedRecipe | null>(null);
     const [toasts, setToasts] = useState<Toast[]>([]);
     const toastId = useRef(0);
@@ -1163,6 +1171,7 @@ const App = () => {
                     setRecipes([]);
                 }
             } catch { setRecipes([]); }
+            finally { recipesHydrated.current = true; }
 
             try {
                 const { data, error } = await supabase.from('ingredient_catalog').select('*').eq('user_id', currentUser.id);
@@ -1180,54 +1189,47 @@ const App = () => {
                     setCatalog([]);
                 }
             } catch { setCatalog([]); }
+            finally { catalogHydrated.current = true; }
         };
         loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentUser?.id]);
 
     useEffect(() => {
-        if (!currentUser) return;
-        const saveRecipes = async () => {
-            try {
-                for (const recipe of recipes) {
-                    const { error } = await supabase.from('recipes').upsert({
-                        id: recipe.id,
-                        user_id: currentUser.id,
-                        name: recipe.name,
-                        yield: recipe.yield,
-                        ingredients: recipe.ingredients,
-                        settings: recipe.settings,
-                        final_price: recipe.finalPrice,
-                        real_price: recipe.realPrice,
-                        last_updated: recipe.lastUpdated
-                    });
-                    if (error) console.error('Error saving recipe:', error);
-                }
-            } catch (err) { console.error('Error syncing recipes:', err); }
-        };
-        saveRecipes();
+        if (!currentUser || !recipesHydrated.current) return;
+        const rows = recipes.map(r => ({
+            id: r.id,
+            user_id: currentUser.id,
+            name: r.name,
+            yield: r.yield,
+            ingredients: r.ingredients,
+            settings: r.settings,
+            final_price: r.finalPrice,
+            real_price: r.realPrice,
+            last_updated: r.lastUpdated
+        }));
+        if (rows.length === 0) return;
+        supabase.from('recipes').upsert(rows).then(({ error }) => {
+            if (error) console.error('[saveRecipes] upsert error:', error);
+        });
     }, [recipes, currentUser]); // eslint-disable-line
 
     useEffect(() => {
-        if (!currentUser) return;
-        const saveCatalog = async () => {
-            try {
-                for (const item of catalog) {
-                    const { error } = await supabase.from('ingredient_catalog').upsert({
-                        id: item.id,
-                        user_id: currentUser.id,
-                        name: item.name,
-                        display_name: item.displayName,
-                        unit: item.unit,
-                        quantity: item.quantity,
-                        price_per_unit: item.pricePerUnit,
-                        last_updated: item.lastUpdated
-                    });
-                    if (error) console.error('Error saving ingredient:', error);
-                }
-            } catch (err) { console.error('Error syncing catalog:', err); }
-        };
-        saveCatalog();
+        if (!currentUser || !catalogHydrated.current) return;
+        const rows = catalog.map(item => ({
+            id: item.id,
+            user_id: currentUser.id,
+            name: item.name,
+            display_name: item.displayName,
+            unit: item.unit,
+            quantity: item.quantity,
+            price_per_unit: item.pricePerUnit,
+            last_updated: item.lastUpdated
+        }));
+        if (rows.length === 0) return;
+        supabase.from('ingredient_catalog').upsert(rows).then(({ error }) => {
+            if (error) console.error('[saveCatalog] upsert error:', error);
+        });
     }, [catalog, currentUser]); // eslint-disable-line
 
     useEffect(() => {
@@ -1248,10 +1250,16 @@ const App = () => {
         addToast(`"${r.name}" guardada`, 'success');
     }, [addToast]);
 
-    const handleDelete = useCallback((id: string) => {
+    const handleDelete = useCallback(async (id: string) => {
         const r = recipes.find(x => x.id === id);
-        if (r && confirm(`¿Eliminar "${r.name}"?`)) { setRecipes(prev => prev.filter(x => x.id !== id)); addToast(`"${r.name}" eliminada`, 'info'); }
-    }, [recipes, addToast]);
+        if (!r || !confirm(`¿Eliminar "${r.name}"?`)) return;
+        setRecipes(prev => prev.filter(x => x.id !== id));
+        addToast(`"${r.name}" eliminada`, 'info');
+        if (currentUser) {
+            const { error } = await supabase.from('recipes').delete().eq('id', id).eq('user_id', currentUser.id);
+            if (error) console.error('[handleDelete] error deleting recipe:', error);
+        }
+    }, [recipes, addToast, currentUser]);
 
     const handleEdit = useCallback((r: SavedRecipe) => { setEditingRecipe(r); setActiveTab('calculator'); addToast(`Editando "${r.name}"`, 'info'); }, [addToast]);
 
